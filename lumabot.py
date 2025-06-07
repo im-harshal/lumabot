@@ -197,3 +197,134 @@ def place_order() -> int:
     Returns:
       The estimated number of minutes until the order is ready.
     """
+
+
+def order_node(state: OrderState) -> OrderState:
+    """The ordering node. This is where the order state is manipulated."""
+    tool_msg = state.get("messages", [])[-1]
+    order = state.get("order", [])
+    outbound_msgs = []
+    order_placed = False
+
+    for tool_call in tool_msg.tool_calls:
+
+        if tool_call["name"] == "add_to_order":
+
+            # Each order item is just a string. This is where it assembled as "drink (modifiers, ...)".
+            modifiers = tool_call["args"].get("modifiers", [])
+            modifier_str = ", ".join(modifiers) if modifiers else "no modifiers"
+
+            order.append(f'{tool_call["args"]["drink"]} ({modifier_str})')
+            response = "\n".join(order)
+
+        elif tool_call["name"] == "confirm_order":
+
+            # We could entrust the LLM to do order confirmation, but it is a good practice to
+            # show the user the exact data that comprises their order so that what they confirm
+            # precisely matches the order that goes to the kitchen - avoiding hallucination
+            # or reality skew.
+
+            # In a real scenario, this is where you would connect your POS screen to show the
+            # order to the user.
+
+            print("Your order:")
+            if not order:
+                print("  (no items)")
+
+            for drink in order:
+                print(f"  {drink}")
+
+            response = input("Is this correct? ")
+
+        elif tool_call["name"] == "get_order":
+
+            response = "\n".join(order) if order else "(no order)"
+
+        elif tool_call["name"] == "clear_order":
+
+            order.clear()
+            response = None
+
+        elif tool_call["name"] == "place_order":
+
+            order_text = "\n".join(order)
+            print("Sending order to kitchen!")
+            print(order_text)
+
+            # TODO(you!): Implement cafe.
+            order_placed = True
+            response = randint(1, 5)  # ETA in minutes
+
+        else:
+            raise NotImplementedError(f'Unknown tool call: {tool_call["name"]}')
+
+        # Record the tool results as tool messages.
+        outbound_msgs.append(
+            ToolMessage(
+                content=response,
+                name=tool_call["name"],
+                tool_call_id=tool_call["id"],
+            )
+        )
+
+    return {"messages": outbound_msgs, "order": order, "finished": order_placed}
+
+
+def maybe_route_to_tools(state: OrderState) -> str:
+    """Route between chat and tool nodes if a tool call is made."""
+    if not (msgs := state.get("messages", [])):
+        raise ValueError(f"No messages found when parsing state: {state}")
+
+    msg = msgs[-1]
+
+    if state.get("finished", False):
+        # When an order is placed, exit the app. The system instruction indicates
+        # that the chatbot should say thanks and goodbye at this point, so we can exit
+        # cleanly.
+        return END
+
+    elif hasattr(msg, "tool_calls") and len(msg.tool_calls) > 0:
+        # Route to `tools` node for any automated tool calls first.
+        if any(
+            tool["name"] in tool_node.tools_by_name.keys() for tool in msg.tool_calls
+        ):
+            return "tools"
+        else:
+            return "ordering"
+
+    else:
+        return "human"
+    
+# Auto-tools will be invoked automatically by the ToolNode
+auto_tools = [get_menu]
+tool_node = ToolNode(auto_tools)
+
+# Order-tools will be handled by the order node.
+order_tools = [add_to_order, confirm_order, get_order, clear_order, place_order]
+
+# The LLM needs to know about all of the tools, so specify everything here.
+llm_with_tools = llm.bind_tools(auto_tools + order_tools)
+
+
+graph_builder = StateGraph(OrderState)
+
+# Nodes
+graph_builder.add_node("chatbot", chatbot_with_tools)
+graph_builder.add_node("human", human_node)
+graph_builder.add_node("tools", tool_node)
+graph_builder.add_node("ordering", order_node)
+
+# Chatbot -> {ordering, tools, human, END}
+graph_builder.add_conditional_edges("chatbot", maybe_route_to_tools)
+# Human -> {chatbot, END}
+graph_builder.add_conditional_edges("human", maybe_exit_human_node)
+
+# Tools (both kinds) always route back to chat afterwards.
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge("ordering", "chatbot")
+
+graph_builder.add_edge(START, "chatbot")
+graph_with_order_tools = graph_builder.compile()
+
+config = {"recursion_limit": 10}
+state = graph_with_order_tools.invoke({"messages": []}, config)
