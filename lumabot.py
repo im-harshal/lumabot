@@ -10,8 +10,11 @@ from langchain_core.tools import tool
 from collections.abc import Iterable
 from random import randint
 from langchain_core.messages.tool import ToolMessage
+from langgraph.prebuilt import ToolNode
+from pprint import pprint
 
 load_dotenv()
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
 
 class OrderState(TypedDict):
     """State representing the customer's order conversation."""
@@ -33,26 +36,35 @@ class OrderState(TypedDict):
 # rules for when to call different functions, as well as rules for the conversation, such
 # as tone and what is permitted for discussion.
 LUMABOT_SYSINT = (
-    "system",  # 'system' indicates the message is a system instruction.
-    "You are a LumaBot, an interactive cafe ordering system. A human will talk to you about the "
-    "available products you have and you will answer any questions about menu items (and only about "
-    "menu items - no off-topic discussion, but you can chat about the products and their history). "
-    "The customer will place an order for 1 or more items from the menu, which you will structure "
-    "and send to the ordering system after confirming the order with the human. "
-    "\n\n"
-    "Add items to the customer's order with add_to_order, and reset the order with clear_order. "
-    "To see the contents of the order so far, call get_order (this is shown to you, not the user) "
-    "Always confirm_order with the user (double-check) before calling place_order. Calling confirm_order will "
-    "display the order items to the user and returns their response to seeing the list. Their response may contain modifications. "
-    "Always verify and respond with drink and modifier names from the MENU before adding them to the order. "
-    "If you are unsure a drink or modifier matches those on the MENU, ask a question to clarify or redirect. "
-    "You only have the modifiers listed on the menu. "
-    "Once the customer has finished ordering items, Call confirm_order to ensure it is correct then make "
-    "any necessary updates and then call place_order. Once place_order has returned, thank the user and "
-    "say goodbye!"
-    "\n\n"
-    "If any of the tools are unavailable, you can break the fourth wall and tell the user that "
-    "they have not implemented them yet and should keep reading to do so.",
+    "system",
+    "You are LumaBot, an interactive cafe ordering assistant."
+
+    "Your job is to:"
+    "- Help customers with questions about the menu (products, history, and available modifiers)."
+    "- Take orders for one or more items from the menu."
+    "- Guide the customer through order confirmation, ensuring the order is correct and priced accurately."
+    "- Complete the order by sending it to the kitchen and providing an estimated pickup time."
+
+    "Menu handling:"
+    "- Only discuss items and modifiers listed on the menu. If a customer asks about an unavailable option, ask for clarification or redirect them to what's available.\n"
+    "- For clarification, always verify drink and modifier names against the MENU before adding to the order."
+
+    "Tool usage:"
+    "- Use 'add_to_order' to add items."
+    "- Use 'clear_order' to reset the order."
+    "- Use 'get_order' to check the current order (for yourself, not for the customer)."
+    "- Before placing an order, always use 'confirm_order' with the customer to show the full order for review."
+    "- Do NOT repeat the order total or summary in your reply after confirmation—this is already displayed to the user by the system. Instead, only acknowledge the order and ask for final confirmation or next steps."
+    "- Once the customer confirms the order, use 'place_order' to finalize it and provide an estimated pickup time."
+    
+    "Conversation flow:"
+    "1. Greet the customer and ask how you can help."
+    "2. Answer menu questions and take their order using the tools above."
+    "3. Confirm the order—let the system display the full summary and total. Only ask for confirmation or next steps in your reply."
+    "4. If the order is confirmed, place it and thank the customer."
+    "5. End the conversation politely after order completion."
+
+    "If any tool is unavailable, inform the user that it hasn't been implemented yet."
 )
 
 # This is the message with which the system opens the conversation.
@@ -84,7 +96,7 @@ def maybe_exit_human_node(state: OrderState) -> Literal["chatbot", "__end__"]:
 
 @tool
 def get_menu() -> str:
-    """Provide the latest up-to-date menu."""
+    """Provide the latest up-to-date menu, including the drink prices."""
     # Note that this is just hard-coded text, but you could connect this to a live stock
     # database, or you could use Gemini's multi-modal capabilities and take live photos of
     # your cafe's chalk menu or the products on the counter and assmble them into an input.
@@ -92,31 +104,31 @@ def get_menu() -> str:
     return """
     MENU:
     Coffee Drinks:
-    Espresso
-    Americano
-    Cold Brew
+      - Espresso ($2.50)
+      - Americano ($2.50)
+      - Cold Brew ($3.00)
 
     Coffee Drinks with Milk:
-    Latte
-    Cappuccino
-    Cortado
-    Macchiato
-    Mocha
-    Flat White
+      - Latte ($3.50)
+      - Cappuccino ($3.50)
+      - Cortado ($3.25)
+      - Macchiato ($3.25)
+      - Mocha ($4.00)
+      - Flat White ($3.50)
 
     Tea Drinks:
-    English Breakfast Tea
-    Green Tea
-    Earl Grey
+      - English Breakfast Tea ($2.00)
+      - Green Tea ($2.00)
+      - Earl Grey ($2.00)
 
     Tea Drinks with Milk:
-    Chai Latte
-    Matcha Latte
-    London Fog
+      - Chai Latte ($3.50)
+      - Matcha Latte ($4.00)
+      - London Fog ($3.50)
 
     Other Drinks:
-    Steamer
-    Hot Chocolate
+      - Steamer ($2.50)
+      - Hot Chocolate ($2.75)
 
     Modifiers:
     Milk options: Whole, 2%, Oat, Almond, 2% Lactose Free; Default option: whole
@@ -133,16 +145,45 @@ def get_menu() -> str:
     Soy milk has run out of stock today, so soy is not available.
   """
 
-from langgraph.prebuilt import ToolNode
+def calculate_total(order: list[str]) -> float:
+    """
+    Calculates the total price (inclusive of tax) of the customer's order.
 
+    Args:
+    order: A list of strings, each representing an order item in the format 'Drink Name | modifiers | price'.
 
-# Define the tools and create a "tools" node.
-tools = [get_menu]
-tool_node = ToolNode(tools)
+    Returns:
+    The total price of all items in the order as a float.
+    """
+    total = 0.0
+    for item in order:
+        try:
+            # Split by '|' and take the last part as price
+            price_str = item.strip().split('$')[-1].strip()
+            price = float(price_str)
+            total += price
+        except Exception:
+            # In case price parsing fails, skip this item
+            continue
+    return round(total, 2)
 
-# Attach the tools to the model so that it knows what it can call.
-llm_with_tools = llm.bind_tools(tools)
-
+def calculate_total_tokens(messages: list) -> int:
+    """
+    Sums up the total LLM tokens used in the session
+    
+    Args:
+        messages (list): The conversation history (state["messages"])
+        
+    Returns:
+        int: Total LLM tokens used in the session
+    """
+    total_tokens = 0
+    for msg in messages:
+        # Check if message is an AIMessage with usage_metadata
+        if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+            tokens = msg.usage_metadata.get("total_tokens", 0)
+            total_tokens += tokens
+    return total_tokens
 
 def chatbot_with_tools(state: OrderState) -> OrderState:
     """The chatbot with tools. A simple wrapper around the model's own chat interface."""
@@ -163,32 +204,25 @@ def chatbot_with_tools(state: OrderState) -> OrderState:
 # schema, so empty functions have been defined that will be bound to the LLM
 # but their implementation is deferred to the order_node.
 
-def add_to_order(drink: str, modifiers: Iterable[str]) -> str:
-    """Adds the specified drink to the customer's order, including any modifiers.
+def add_to_order(drink: str, modifiers: Iterable[str], price) -> str:
+    """Adds the specified drink to the customer's order, including the price and any modifiers.
 
     Returns:
       The updated order in progress.
     """
 
-
 @tool
-def confirm_order() -> str:
-    """Asks the customer if the order is correct.
-
-    Returns:
-      The user's free-text response.
+def confirm_order():
+    """Displays the order summary which include the all the orders (including modifications and prices), taxes, and total cost of the orders.
     """
-
 
 @tool
 def get_order() -> str:
     """Returns the users order so far. One item per line."""
 
-
 @tool
 def clear_order():
     """Removes all items from the user's order."""
-
 
 @tool
 def place_order() -> int:
@@ -212,46 +246,37 @@ def order_node(state: OrderState) -> OrderState:
 
             # Each order item is just a string. This is where it assembled as "drink (modifiers, ...)".
             modifiers = tool_call["args"].get("modifiers", [])
-            modifier_str = ", ".join(modifiers) if modifiers else "no modifiers"
+            modifier_str = ", ".join(modifiers) if modifiers else "No Modifiers"
 
-            order.append(f'{tool_call["args"]["drink"]} ({modifier_str})')
+            order.append(f'{tool_call["args"]["drink"]} | {modifier_str} | ${round(float(tool_call["args"].get("price", 0)),2)}')
             response = "\n".join(order)
 
         elif tool_call["name"] == "confirm_order":
-
-            # We could entrust the LLM to do order confirmation, but it is a good practice to
-            # show the user the exact data that comprises their order so that what they confirm
-            # precisely matches the order that goes to the kitchen - avoiding hallucination
-            # or reality skew.
-
-            # In a real scenario, this is where you would connect your POS screen to show the
-            # order to the user.
-
-            print("Your order:")
-            if not order:
-                print("  (no items)")
+            print("Order Summary: ")
 
             for drink in order:
-                print(f"  {drink}")
+                print(f"    {drink}")
 
-            response = input("Is this correct? ")
+            before_tax = calculate_total(order)
+            sales_tax = round(before_tax*0.0825, 2)
+            convenience_fee = round(calculate_total_tokens(state.get("messages", []))*0.001, 2)
+            grand_total = round(before_tax+sales_tax+convenience_fee, 2)
+            print(f"    Total: ${round(before_tax,2)}")
+            print(f"    Sales Tax (8.25%): ${sales_tax}")
+            print(f"    Convenience Fee: ${convenience_fee}")
+            print(f"    Grand Total: ${grand_total}")
+            response = None
 
         elif tool_call["name"] == "get_order":
-
             response = "\n".join(order) if order else "(no order)"
 
         elif tool_call["name"] == "clear_order":
-
             order.clear()
             response = None
 
         elif tool_call["name"] == "place_order":
 
-            order_text = "\n".join(order)
-            print("Sending order to kitchen!")
-            print(order_text)
-
-            # TODO(you!): Implement cafe.
+            print("Thank you! Sending order to the kitchen!")
             order_placed = True
             response = randint(1, 5)  # ETA in minutes
 
@@ -326,5 +351,5 @@ graph_builder.add_edge("ordering", "chatbot")
 graph_builder.add_edge(START, "chatbot")
 graph_with_order_tools = graph_builder.compile()
 
-config = {"recursion_limit": 10}
+config = {"recursion_limit": 100}
 state = graph_with_order_tools.invoke({"messages": []}, config)
