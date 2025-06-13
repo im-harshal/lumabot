@@ -53,6 +53,7 @@ LUMABOT_SYSINT = (
     "- Use 'add_to_order' to add items."
     "- Use 'clear_order' to reset the order."
     "- Use 'get_order' to check the current order (for yourself, not for the customer)."
+    "- When adding an item, check for common allergens based on the modifier (e.g., milk, nuts). Warn the customer and ask for confirmation if any are present."
     "- Before placing an order, always use 'confirm_order' with the customer to show the full order for review."
     "- Do NOT repeat the order total or summary in your reply after confirmation—this is already displayed to the user by the system. Instead, only acknowledge the order and ask for final confirmation or next steps."
     "- Once the customer confirms the order, use 'place_order' to finalize it and provide an estimated pickup time."
@@ -66,6 +67,12 @@ LUMABOT_SYSINT = (
 
     "If any tool is unavailable, inform the user that it hasn't been implemented yet."
 )
+
+COMMON_ALLERGENS = {
+    "milk": ["whole", "2%", "oat", "almond", "lactose free"],
+    "nuts": ["almond"],
+    "soy": ["soy"],
+}
 
 # This is the message with which the system opens the conversation.
 WELCOME_MSG = "Welcome to the LumaBot cafe. Type `q` to quit. How may I serve you today?"
@@ -248,8 +255,23 @@ def order_node(state: OrderState) -> OrderState:
             modifiers = tool_call["args"].get("modifiers", [])
             modifier_str = ", ".join(modifiers) if modifiers else "No Modifiers"
 
-            order.append(f'{tool_call["args"]["drink"]} | {modifier_str} | ${round(float(tool_call["args"].get("price", 0)),2)}')
+            allergens_detected = []
+            for allergen, keywords in COMMON_ALLERGENS.items():
+                if any(keyword.lower() in modifier_str.lower() for keyword in keywords):
+                    allergens_detected.append(allergen)
+
+            order_item = f'{tool_call["args"]["drink"]} | {modifier_str} | ${round(float(tool_call["args"].get("price", 0)),2)}'
+            order.append(order_item)
+
+            # Construct response
             response = "\n".join(order)
+            if allergens_detected:
+                response += (
+                    f"\n⚠️ Allergy Warning: This item may contain or be modified with: {', '.join(allergens_detected).title()}."
+                    " Please confirm you are okay with this."
+                )
+            # order.append(f'{tool_call["args"]["drink"]} | {modifier_str} | ${round(float(tool_call["args"].get("price", 0)),2)}')
+            # response = "\n".join(order)
 
         elif tool_call["name"] == "confirm_order":
             print("Order Summary: ")
