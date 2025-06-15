@@ -1,0 +1,5 @@
+dotenv==0.9.9
+typing_extensions==4.14.0
+langgraph==0.4.8
+langchain_google_genai==2.1.5
+streamlit==1.45.1
