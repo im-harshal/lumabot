@@ -54,14 +54,16 @@ LUMABOT_SYSINT = (
     "- Use 'clear_order' to reset the order."
     "- Use 'get_order' to check the current order (for yourself, not for the customer)."
     "- When adding an item, check for common allergens based on the modifier (e.g., milk, nuts). Warn the customer and ask for confirmation if any are present."
-    "- Before placing an order, always use 'confirm_order' to display the total bill of the order and ask if he is ready to pay."
-    "- Once the customer confirms the order, use 'place_order' to finalize it and provide an estimated pickup time."
+    "- When the customer is ready to checkout, use 'checkout_order' to show the total bill and ask if the customer is ready to pay."\
+    "- When the cutomer is ready to pay, use 'place_order' to finalize the order and provide an estimated pickup time."
     
     "Conversation flow:"
     "1. Greet the customer and ask how you can help."
     "2. Answer menu questions and take their order using the tools above."
-    "3. Display the total bill of the order and confirm if the customer is ready to pay."
-    "4. If the order is confirmed, place it and thank the customer."
+    "3. When the customer indicates they are done (e.g., says `No` to more items), add the item to the order."
+    "   - If the customer says yes, ask if they are ready to checkout their order."
+    "   - If the customer says no, politely ask if they would like to make any changes or cancel the order."
+    "4. Once the customer successfully checks out the order, place the order and thank them."
     "5. End the conversation politely after order completion."
 
     "If any tool is unavailable, inform the user that it hasn't been implemented yet."
@@ -74,7 +76,7 @@ COMMON_ALLERGENS = {
 }
 
 # This is the message with which the system opens the conversation.
-WELCOME_MSG = "Welcome to the LumaBot cafe. Type `q` to quit. How may I serve you today?"
+WELCOME_MSG = "Hello! I am Luma. How can I serve you today?"
 
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
 
@@ -199,7 +201,7 @@ def add_to_order(drink: str, modifiers: Iterable[str], price) -> str:
     """
 
 @tool
-def confirm_order():
+def checkout_order():
     """Returns the total bill of the order.
     """
 
@@ -254,8 +256,8 @@ def order_node(state: OrderState) -> OrderState:
             # response = "\n".join(order)
             print("Order: ", response)
 
-        elif tool_call["name"] == "confirm_order":
-            print("Calling confirm_order() tool")
+        elif tool_call["name"] == "checkout_order":
+            print("Calling checkout_order() tool")
             pre_tax = calculate_total(order)
             response = f"Total Bill: {round(1.0825*pre_tax,2)}"
 
@@ -320,7 +322,7 @@ auto_tools = [get_menu]
 tool_node = ToolNode(auto_tools)
 
 # Order-tools will be handled by the order node.
-order_tools = [add_to_order, confirm_order, get_order, clear_order, place_order]
+order_tools = [add_to_order, checkout_order, get_order, clear_order, place_order]
 
 # The LLM needs to know about all of the tools, so specify everything here.
 llm_with_tools = llm.bind_tools(auto_tools + order_tools)
@@ -344,8 +346,8 @@ graph_builder.add_edge(START, "chatbot")
 graph_with_order_tools = graph_builder.compile()
 
 # ---- Streamlit UI for LumaBot ----
-st.set_page_config(page_title="LumaBot Cafe", page_icon="☕")
-st.title("LumaBot Cafe Ordering Assistant")
+st.set_page_config(page_title="Luma Cafe", page_icon="☕")
+st.title("Luma Cafe AI Assistant")
 st.caption("Powered by Gemini, LangGraph, and Streamlit")
 
 if st.button("Start Over", type="primary"):
@@ -397,3 +399,8 @@ if not order_state["finished"]:
 else:
     st.success("✅ Order complete! Thank you for visiting LumaBot Cafe.")
 
+if order_state["order"]:
+    with st.expander("Your Order So Far"):
+        for item in order_state["order"]:
+            st.write(item)
+            print(f"[Streamlit] Order item: {item}")
